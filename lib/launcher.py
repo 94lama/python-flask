@@ -78,6 +78,7 @@ environ = {
 def reset_environ():
     environ["REQUEST_METHOD"]="GET" #Resets the value in case the method is not specified
     environ["QUERY_STRING"] = ""
+    environ["PATH_INFO"] = "/"
 
 # Collect the response body
 def build_response(response_iter):
@@ -109,7 +110,7 @@ while True:
           elif k == "API_URL": environ["API_URL"] = v
           elif k in ["method", "__ow_method"]: environ["REQUEST_METHOD"] = v.upper()
           # multiple values for PATH_INFO allows to cover both cli invocation and url requests
-          elif k == "path": environ["PATH_INFO"] = v
+          elif k in ["path", "__ow_path"]: environ["PATH_INFO"] = v
           elif "__ow_" not in k:
             if environ["QUERY_STRING"]: environ["QUERY_STRING"] = f"{environ["QUERY_STRING"]}&{k}={v}" 
             else: environ["QUERY_STRING"] = f"{k}={v}"
