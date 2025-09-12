@@ -17,7 +17,6 @@
 from __future__ import print_function
 from sys import stdin, stdout, stderr
 from os import fdopen
-from wsgiref.simple_server import make_server
 import sys, os, json, traceback, requests
 
 try:
@@ -73,18 +72,13 @@ environ = {
   "REQUEST_METHOD":"GET",
   "API_URL":"http://localhost:5000/",
   "PATH_INFO":"/",
-  "QUERY_STRING":"",
-  "CONTENT_TYPE":"application/json",
-  #"request.args":json.dumps({}),
-  #"request.body":json.dumps({}),
-  #"request.headers":json.dumps({}),
-  #"request.method":"GET",
-  #"request.url":"http://localhost:5000/",
-  #"request.path":"/",
-  #"request.query_string":"",
-  #"request.content_type":"application/json"
+  "CONTENT_TYPE":"application/json"
 }
-    
+
+def reset_environ():
+    environ["REQUEST_METHOD"]="GET" #Resets the value in case the method is not specified
+    environ["QUERY_STRING"] = ""
+
 # Collect the response body
 def build_response(response_iter):
   response_body = b''
@@ -97,7 +91,7 @@ def build_response(response_iter):
   return {
   #  "statusCode": response_status,
   #  "headers": response_headers,
-    "body": response_body.decode('utf-8') if isinstance(response_body, bytes) else "test",
+    "body": response_body.decode('utf-8') if isinstance(response_body, bytes) else response_body,
   }
 
 while True:
@@ -105,72 +99,37 @@ while True:
   if not line: break
   args = json.loads(line)
 
+  reset_environ()
   res = {}    
   try:
     for key in args:
       if key == "value" and isinstance(args[key], dict):
         for k, v in args["value"].items():
-          if k == "PREFERRED_URL_SCHEME":
-            environ["wsgi.url_scheme"] = v
-          elif k == "API_URL":
-            environ["API_URL"] = v
-          elif k == "method":
-            environ["REQUEST_METHOD"] = v
-          elif k in ["path", "__ow_path", "PATH_INFO"]: # multiple values for PATH_INFO allows to cover both cli invocation and url requests
-            environ["PATH_INFO"] = v
+          if k == "PREFERRED_URL_SCHEME": environ["wsgi.url_scheme"] = v
+          elif k == "API_URL": environ["API_URL"] = v
+          elif k in ["method", "__ow_method"]: environ["REQUEST_METHOD"] = v.upper()
+          # multiple values for PATH_INFO allows to cover both cli invocation and url requests
+          elif k == "path": environ["PATH_INFO"] = v
           elif "__ow_" not in k:
-            if environ["QUERY_STRING"]:
-              environ["QUERY_STRING"] += f"&{k}={v}" 
-            else: 
-              environ["QUERY_STRING"] = f"{k}={v}"
-          #else:
-          #  environ[k] = v
+            if environ["QUERY_STRING"]: environ["QUERY_STRING"] = f"{environ["QUERY_STRING"]}&{k}={v}" 
+            else: environ["QUERY_STRING"] = f"{k}={v}"
+          else: environ[k] = v
       elif key == "value":
         environ["wsgi.input"] = args[key]
       else:
         env["__OW_%s" % key.upper()]= args[key]
+
 
     print(args, file=stdout)
     res = build_response(app(environ, start_response))
   except Exception as e:
     res = {"error": str(e)}
 
+  #out.write(json.dumps(args, ensure_ascii=False).encode('utf-8'))
+  #out.write(b'\n')
+
   out.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
   out.write(b'\n')
   stdout.flush()
   stderr.flush()
   out.flush()
-
-  """ 
-  stdout: 
-  {
-  'wsgi.url_scheme': 'http', 
-  'wsgi.input': <_io.TextIOWrapper name='<stdin>' mode='r' encoding='utf-8'>, 
-  'wsgi.output': <_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>, 
-  'wsgi.errors': <_io.TextIOWrapper name='<stderr>' mode='w' encoding='utf-8'>, 
-  'wsgi.multithread': True, 
-  'wsgi.multiprocess': True,
-  'wsgi.run_once': False,
-  'REQUEST_METHOD': 'GET',
-  'API_URL': 'http://localhost:5000/',
-  'PATH_INFO': '/',
-  'QUERY_STRING': '',
-  'CONTENT_TYPE': 'application/json',
-  '__ow_headers': {
-    'accept': '*/*',
-    'host': 'miniops.me',
-    'user-agent': 'curl/7.81.0',
-    'x-forwarded-for': '172.18.0.1',
-    'x-forwarded-host': 'miniops.me',
-    'x-forwarded-port': '80',
-    'x-forwarded-proto': 'http',
-    'x-forwarded-scheme': 'http',
-    'x-real-ip': '172.18.0.1',
-    'x-request-id': '1e4f1f155ece06c83508904a0dd27b2e',
-    'x-scheme': 'http'
-    },
-  '__ow_method': 'get',
-  '__ow_path': '/hello',
-  'werkzeug.request': None
-  }
-   """
