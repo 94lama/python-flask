@@ -17,7 +17,11 @@
 from __future__ import print_function
 from sys import stdin, stdout, stderr
 from os import fdopen
+from io import BytesIO
+import base64
+import urllib.parse
 import sys, os, json, traceback, requests
+
 
 try:
   # if the directory 'virtualenv' is extracted out of a zip file
@@ -62,38 +66,31 @@ def start_response(status, headers):
   return []
 
 environ = {
-  "wsgi.url_scheme":"http",
-  "wsgi.input":stdin,
-  "wsgi.output":stdout,
-  "wsgi.errors":stderr,
-  "wsgi.multithread":True,
-  "wsgi.multiprocess":False,
-  "wsgi.run_once":False,
-  "REQUEST_METHOD":"GET",
-  "API_URL":"http://localhost:5000/",
-  "PATH_INFO":"/",
-  "CONTENT_TYPE":"application/json"
+  "wsgi.url_scheme": "http",
+  "wsgi.input": stdin,
+  "wsgi.output": stdout,
+  "wsgi.errors": stderr,
+  "wsgi.multithread": False,
+  "wsgi.multiprocess": True,
+  "wsgi.run_once": True,
+  "ACCEPT": "*/*",
+  #"API_URL": "http://localhost:5000/",
+  "PATH_INFO": "/",
+  "CONTENT_TYPE": "application/json",
+  "CONTENT_LENGTH": "0",
+  "QUERY_STRING": "",
+  "REQUEST_METHOD": "GET",
 }
 
 def reset_environ():
-    environ["REQUEST_METHOD"]="GET" #Resets the value in case the method is not specified
-    environ["QUERY_STRING"] = ""
-    environ["PATH_INFO"] = "/"
+  environ["wsgi.input"]=stdin
+  environ["ACCEPT"]="*/*"
+  environ["CONTENT_TYPE"]="application/json"
+  environ["CONTENT_LENGTH"] = "0"
+  environ["PATH_INFO"] = "/"
+  environ["QUERY_STRING"] = ""
+  environ["REQUEST_METHOD"]="GET" #Resets the value in case the method is not specified
 
-# Collect the response body
-def build_response(response_iter):
-  response_body = b''
-  for chunk in response_iter:
-    if isinstance(chunk, bytes):
-      response_body += chunk
-    else:
-      response_body += chunk.encode('utf-8')
-  
-  return {
-  #  "statusCode": response_status,
-  #  "headers": response_headers,
-    "body": response_body.decode('utf-8') if isinstance(response_body, bytes) else response_body,
-  }
 
 while True:
   line = stdin.readline()
@@ -101,33 +98,86 @@ while True:
   args = json.loads(line)
 
   reset_environ()
-  res = {}    
+  res = {}
+  params = {}
+
   try:
-    for key in args:
-      if key == "value" and isinstance(args[key], dict):
-        for k, v in args["value"].items():
-          if k == "PREFERRED_URL_SCHEME": environ["wsgi.url_scheme"] = v
-          elif k == "API_URL": environ["API_URL"] = v
-          elif k in ["method", "__ow_method"]: environ["REQUEST_METHOD"] = v.upper()
-          # multiple values for PATH_INFO allows to cover both cli invocation and url requests
-          elif k in ["path", "__ow_path"]: environ["PATH_INFO"] = v
-          elif "__ow_" not in k:
-            if environ["QUERY_STRING"]: environ["QUERY_STRING"] = f"{environ["QUERY_STRING"]}&{k}={v}" 
-            else: environ["QUERY_STRING"] = f"{k}={v}"
-          else: environ[k] = v
-      elif key == "value":
-        environ["wsgi.input"] = args[key]
-      else:
-        env["__OW_%s" % key.upper()]= args[key]
+    # Parse the input arguments to build the WSGI environ
+    if isinstance(args["value"], dict):
+      for k, v in args["value"].items():
+        if k == "PREFERRED_URL_SCHEME": 
+          environ["wsgi.url_scheme"] = v
+        elif k == "API_URL": 
+          environ["API_URL"] = v
+        elif k == "method": 
+          environ["REQUEST_METHOD"] = v.upper()
+        # multiple values for PATH_INFO allows to cover both cli invocation and url requests
+        elif k == "path": 
+          environ["PATH_INFO"] = v
+        elif not k.startswith("__ow_") and k not in ["action_name", "action_version", "activation_id", "deadline", "namespace", "transaction_id"]:
+          # Collect query parameters
+          query_params[k] = v
+        # managing the headers
+        elif k == "headers":
+          if isinstance(v, dict):
+            ct = v.get("content-type") or v.get("Content-Type")
+            if ct: environ["CONTENT_TYPE"] = ct
+            acc = v.get("accept") or v.get("Accept")
+            if acc: environ["ACCEPT"] = acc
+            xs = v.get("x-scheme") or v.get("X-Scheme")
+            if xs: environ["wsgi.url_scheme"] = xs
+        else:
+          params[k] = v
 
+    # Build body or query string from collected payload
+    method = environ.get("REQUEST_METHOD", "GET").upper()
+    ct = environ.get("CONTENT_TYPE", "").lower()
+    
+    if method in ["POST", "PUT", "PATCH", "DELETE"]:
+      # Use the captured request body if available
+      if request_body is not None:
+        if isinstance(request_body, dict):
+          body_bytes = json.dumps(request_body).encode("utf-8")
+        elif isinstance(request_body, str):
+          body_bytes = request_body.encode("utf-8")
+        else:
+          body_bytes = str(request_body).encode("utf-8")
+      elif query_params:
+        # If no body field but we have query_params, use them as body for POST
+        if "json" in ct:
+          body_bytes = json.dumps(query_params).encode("utf-8")
+        elif "form-urlencoded" in ct:
+          body_bytes = urllib.parse.urlencode(query_params, doseq=True).encode("utf-8")
+        else:
+          body_bytes = json.dumps(query_params).encode("utf-8")
+      
+      environ["CONTENT_LENGTH"] = str(len(body_bytes))
+    
+    # Build query string from query_params (for GET or as additional params for other methods)
+    if query_params:
+      environ["QUERY_STRING"] = urllib.parse.urlencode(query_params, doseq=True)
 
-    print(args, file=stdout)
-    res = build_response(app(environ, start_response))
+    environ["wsgi.input"] = BytesIO(body_bytes)
+
+    response_body = ""
+    response = app(environ, start_response)
+    if response.json:
+      response_body = json.dumps(response.json).encode('utf-8')
+    else:
+      for chunk in response:
+        if isinstance(chunk, str):
+          chunk = chunk.encode('utf-8')
+        response_body += chunk
   except Exception as e:
-    res = {"error": str(e)}
+    stderr.write(f"Error building response: {e}\n")
+    response_body = f'Error building response: {e}'.encode('utf-8')
 
-  #out.write(json.dumps(args, ensure_ascii=False).encode('utf-8'))
-  #out.write(b'\n')
+  """ res = {
+    "statusCode": response_status,
+    "headers": response_headers,
+    "body": response_body
+  } """
+  res = "ok"#response_body.decode('utf-8')
 
   out.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
   out.write(b'\n')
